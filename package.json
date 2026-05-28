@@ -1,0 +1,26 @@
+{
+  "name": "arb-sepolia-faucet",
+  "version": "1.0.0",
+  "description": "Minimal HTTP faucet for Arbitrum Sepolia test ETH (POST /drip). No framework — Node + ethers.",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.0"
+  },
+  "keywords": [
+    "arbitrum",
+    "sepolia",
+    "faucet",
+    "testnet",
+    "ethereum"
+  ],
+  "license": "MIT"
+}
