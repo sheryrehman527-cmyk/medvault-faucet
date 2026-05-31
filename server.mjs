@@ -11,7 +11,8 @@
  *   ARBITRUM_SEPOLIA_RPC_URL — optional (default: public Arbitrum Sepolia rollup RPC)
  *   PORT — optional, default 8787
  *   DRIP_ETH — optional, default 0.0004
- *   COOLDOWN_MS — optional, default 86400000 (24h per address & per IP)
+ *   COOLDOWN_MS — optional, default 86400000 (24h window per address & per IP)
+ *   MAX_DRIPS_PER_WINDOW — optional, default 3 (drips allowed per address/IP per window)
  *   FAUCET_CORS_ORIGIN — optional, default * (set to your app origin in production)
  */
 import "dotenv/config";
@@ -26,10 +27,13 @@ const PK = process.env.FAUCET_PRIVATE_KEY;
 const PORT = Number(process.env.PORT || 8787);
 const DRIP = ethers.parseEther(process.env.DRIP_ETH || "0.0004");
 const COOLDOWN_MS = Number(process.env.COOLDOWN_MS || 86_400_000);
+const MAX_DRIPS = Math.max(1, Number(process.env.MAX_DRIPS_PER_WINDOW || 3));
 const CORS = (process.env.FAUCET_CORS_ORIGIN || "*").trim();
 
-const lastByAddress = new Map();
-const lastByIp = new Map();
+/** @type {Map<string, { windowStart: number, count: number }>} */
+const dripsByAddress = new Map();
+/** @type {Map<string, { windowStart: number, count: number }>} */
+const dripsByIp = new Map();
 
 function corsHeaders() {
   return {
@@ -52,14 +56,31 @@ function clientIp(req) {
   return req.socket.remoteAddress || "unknown";
 }
 
-function checkCooldown(map, key, now) {
-  const t = map.get(key);
-  if (t === undefined) return null;
-  const elapsed = now - t;
-  if (elapsed < COOLDOWN_MS) {
-    return COOLDOWN_MS - elapsed;
+/**
+ * @returns {null | { retryAfterMs: number, remaining: number }}
+ */
+function checkDripLimit(map, key, now) {
+  let entry = map.get(key);
+  if (!entry || now - entry.windowStart >= COOLDOWN_MS) {
+    entry = { windowStart: now, count: 0 };
+    map.set(key, entry);
+  }
+  if (entry.count >= MAX_DRIPS) {
+    return {
+      retryAfterMs: COOLDOWN_MS - (now - entry.windowStart),
+      remaining: 0,
+    };
   }
   return null;
+}
+
+function recordDrip(map, key, now) {
+  let entry = map.get(key);
+  if (!entry || now - entry.windowStart >= COOLDOWN_MS) {
+    entry = { windowStart: now, count: 0 };
+  }
+  entry.count += 1;
+  map.set(key, entry);
 }
 
 async function main() {
@@ -112,6 +133,8 @@ async function main() {
         service: "arb-sepolia-faucet",
         chain: "arbitrum-sepolia",
         chainId: Number(EXPECTED_CHAIN_ID),
+        maxDripsPerWindow: MAX_DRIPS,
+        cooldownMs: COOLDOWN_MS,
       });
       return;
     }
@@ -135,19 +158,21 @@ async function main() {
       const now = Date.now();
       const ip = clientIp(req);
 
-      const waitAddr = checkCooldown(lastByAddress, checksum.toLowerCase(), now);
+      const waitAddr = checkDripLimit(dripsByAddress, checksum.toLowerCase(), now);
       if (waitAddr !== null) {
         json(res, 429, {
-          error: "This address already received a drip recently. Try again later.",
-          retryAfterMs: waitAddr,
+          error: `This address has used all ${MAX_DRIPS} drips for this period. Try again later.`,
+          retryAfterMs: waitAddr.retryAfterMs,
+          dripsRemaining: waitAddr.remaining,
         });
         return;
       }
-      const waitIp = checkCooldown(lastByIp, ip, now);
+      const waitIp = checkDripLimit(dripsByIp, ip, now);
       if (waitIp !== null) {
         json(res, 429, {
-          error: "Too many requests from this network. Try again later.",
-          retryAfterMs: waitIp,
+          error: `Too many requests from this network (${MAX_DRIPS} per period). Try again later.`,
+          retryAfterMs: waitIp.retryAfterMs,
+          dripsRemaining: waitIp.remaining,
         });
         return;
       }
@@ -160,8 +185,12 @@ async function main() {
       }
 
       const tx = await wallet.sendTransaction({ to: checksum, value: DRIP });
-      lastByAddress.set(checksum.toLowerCase(), now);
-      lastByIp.set(ip, now);
+      recordDrip(dripsByAddress, checksum.toLowerCase(), now);
+      recordDrip(dripsByIp, ip, now);
+
+      const addrEntry = dripsByAddress.get(checksum.toLowerCase());
+      const dripsUsed = addrEntry?.count ?? 1;
+      const dripsRemaining = Math.max(0, MAX_DRIPS - dripsUsed);
 
       const txHash = tx.hash;
       json(res, 200, {
@@ -169,6 +198,9 @@ async function main() {
         txHash,
         chainId: Number(EXPECTED_CHAIN_ID),
         explorerUrl: `https://sepolia.arbiscan.io/tx/${txHash}`,
+        dripsUsed,
+        dripsRemaining,
+        maxDripsPerWindow: MAX_DRIPS,
       });
     } catch (e) {
       console.error(e);
