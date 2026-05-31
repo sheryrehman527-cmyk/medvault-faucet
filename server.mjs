@@ -28,7 +28,15 @@ const PORT = Number(process.env.PORT || 8787);
 const DRIP = ethers.parseEther(process.env.DRIP_ETH || "0.0004");
 const COOLDOWN_MS = Number(process.env.COOLDOWN_MS || 86_400_000);
 const MAX_DRIPS = Math.max(1, Number(process.env.MAX_DRIPS_PER_WINDOW || 3));
-const CORS = (process.env.FAUCET_CORS_ORIGIN || "*").trim();
+
+/** Browser origins must match exactly — no trailing slash (https://med-vault.xyz not …xyz/). */
+function normalizeCorsOrigin(raw) {
+  const v = (raw || "*").trim();
+  if (v === "*") return "*";
+  return v.replace(/\/+$/, "");
+}
+
+const CORS = normalizeCorsOrigin(process.env.FAUCET_CORS_ORIGIN);
 
 /** @type {Map<string, { windowStart: number, count: number }>} */
 const dripsByAddress = new Map();
